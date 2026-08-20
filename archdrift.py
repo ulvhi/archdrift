@@ -21,6 +21,8 @@ from pathlib import Path
 import anthropic
 from rich.console import Console
 from rich.padding import Padding
+from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
@@ -32,7 +34,7 @@ from rich.text import Text
 class Dim(StrEnum):
     COMPONENTS = "components"  # every drawn box exists in code; every active integration is drawn
     FLOWS = "flows"            # every drawn arrow's direction + mechanism + chain order
-    CONTRACTS = "contracts"    # bound identifiers (topics, Feign ids, DB names) equal the labels
+    BINDINGS = "bindings"      # bound identifiers (topics, Feign ids, DB names) equal the labels
 
 
 class Status(StrEnum):
@@ -41,7 +43,7 @@ class Status(StrEnum):
     FAIL = "fail"
 
 
-WEIGHTS: dict[Dim, int] = {Dim.COMPONENTS: 40, Dim.FLOWS: 35, Dim.CONTRACTS: 25}
+WEIGHTS: dict[Dim, int] = {Dim.COMPONENTS: 40, Dim.FLOWS: 35, Dim.BINDINGS: 25}
 DRIFT_UNIT_PENALTY = 5   # per undrawn integration / pipeline, capped
 DRIFT_PENALTY_CAP = 20
 
@@ -51,7 +53,7 @@ microservice's implementation (Java sources, build.gradle, application*.yml,
 runtime KV config) against its High-Level Design diagram. Architecture is
 exactly what a diagram can draw: components (boxes — the service, datastores,
 topics, caches, schedulers, external systems and clients), flows (arrows —
-their direction and mechanism), and contracts (the identifiers labels bind).
+their direction and mechanism), and bindings (the identifiers labels bind).
 
 The diagram is already scoped to this service's own arrows; the rest of the
 subsystem is other services' responsibility. Validate it 1:1, both directions:
@@ -72,7 +74,7 @@ F1, …. Return:
   writer). Report the true code order even if it equals the drawn order — the
   tool compares the two deterministically and fails any mismatch. Empty when
   there are no numbered steps.
-- contract_checks: one row per bound identifier you can verify (Kafka topic
+- binding_checks: one row per bound identifier you can verify (Kafka topic
   name, Feign service id, DB schema/collection) — expected = the drawn label,
   actual = the resolved binding. A renamed identifier is fail.
 Never omit a C-id or F-id; if unsure, use warn, never silence.
@@ -93,8 +95,8 @@ is invisible to this gate. Only invoked integrations are architecture —
 declared-but-never-used code goes to "dormant", never to a verdict. Match
 components semantically ("Debt MS" may be DebtClient); match identifiers
 literally. A bracketed/parenthesized qualifier in a label ("ms-card
-[birbank-backend]") is judged deterministically by the tool — do NOT mark a
-component warn or fail on account of a namespace, and do not emit contract
+[team-namespace]") is judged deterministically by the tool — do NOT mark a
+component warn or fail on account of a namespace, and do not emit binding
 rows about namespaces; just report the class and the resolved URL as actual.
 
 A diagram draws COMPONENTS and the edges between them, never internal classes.
@@ -133,7 +135,7 @@ AUDIT_SCHEMA = {
         "summary": {"type": "string", "description": "Two-sentence architect's verdict."},
         "component_verdicts": {"type": "array", "items": VERDICT_ITEM},
         "flow_verdicts": {"type": "array", "items": VERDICT_ITEM},
-        "contract_checks": {
+        "binding_checks": {
             "type": "array",
             "items": {
                 "type": "object",
@@ -177,7 +179,7 @@ AUDIT_SCHEMA = {
             },
         },
     },
-    "required": ["summary", "component_verdicts", "flow_verdicts", "contract_checks",
+    "required": ["summary", "component_verdicts", "flow_verdicts", "binding_checks",
                  "code_step_order", "extra", "dormant", "undrawn_flows"],
     "additionalProperties": False,
 }
@@ -207,6 +209,12 @@ class Check:
 
 
 @dataclass(slots=True, frozen=True)
+class AiExchange:
+    request_body: str    # exact structured payload assembled for the model; redaction already applied
+    response_body: str   # raw model JSON before local reverse-redaction
+
+
+@dataclass(slots=True, frozen=True)
 class Audit:
     summary: str
     extra: tuple[str, ...]                                    # standalone active drift — scored
@@ -214,6 +222,7 @@ class Audit:
     undrawn_flows: tuple[tuple[str, tuple[Hop, ...]], ...] = ()  # (title, hops)
     checks: tuple[Check, ...] = ()
     code_step_order: tuple[str, ...] = ()                    # step ids in the order the CODE runs them
+    ai_exchanges: tuple[AiExchange, ...] = ()
 
 
 # ── collectors ───────────────────────────────────────────────────────────────
@@ -319,7 +328,9 @@ def scope_to_service(diagram: Diagram, service: str) -> Diagram:
 
 
 def harvest_codebase(root: Path) -> dict[str, str]:
-    # TODO: collect architecture artifacts — Java sources (minus DTOs/entities), gradle, application*.yml.
+    # TODO: collect architecture artifacts — Java sources (minus DTOs/entities), gradle, base yml.
+    # Profile ymls in the repo (application-local, -preprod) are a developer's machine, not runtime
+    # truth: they carry localhost hosts and stale names. Consul is the only profile config we trust.
     skip_dirs = {"dto", "dtos", "entity", "entities", "domain", "model", "models", "build", "bin"}
     skip_suffixes = ("Dto.java", "Entity.java", "Request.java", "Response.java")
 
@@ -331,7 +342,9 @@ def harvest_codebase(root: Path) -> dict[str, str]:
         )
 
     java = sorted(p for p in root.rglob("src/main/java/**/*.java") if _architectural(p))
-    config = [root / "build.gradle", *sorted(root.rglob("src/main/resources/**/application*.yml"))]
+    config = [root / "build.gradle",
+              *sorted(p for p in root.rglob("src/main/resources/**/application*.yml")
+                      if p.stem == "application")]
     return {
         str(p.relative_to(root)): p.read_text(encoding="utf-8", errors="replace")
         for p in (*java, *config)
@@ -401,8 +414,8 @@ def build_checks(verdict: dict, diagram: Diagram) -> tuple[tuple[Check, ...], li
         else:
             checks.append(Check(Dim.FLOWS, Status.WARN, expected, "not assessed — rerun or use a stronger model"))
             unassessed.append(f"F{i}")
-    for c in verdict.get("contract_checks", []):
-        checks.append(Check(Dim.CONTRACTS, Status(c["status"]), c["expected"], c["actual"]))
+    for c in verdict.get("binding_checks", []):
+        checks.append(Check(Dim.BINDINGS, Status(c["status"]), c["expected"], c["actual"]))
     return tuple(checks), unassessed
 
 
@@ -439,15 +452,20 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
         return apply_map("\n\n".join(blocks), redact) if redact else "\n\n".join(blocks)
 
     client = anthropic.Anthropic()
+    exchanges: list[AiExchange] = []
 
     def _ask(content: str) -> dict:
         # TODO: one structured call; surface API/parse failures as clean messages, not tracebacks.
+        request = {
+            "model": model,
+            "max_tokens": 32_000,
+            "system": apply_map(CRITERIA, redact) if redact else CRITERIA,
+            "output_config": {"format": {"type": "json_schema", "schema": AUDIT_SCHEMA}},
+            "messages": [{"role": "user", "content": content}],
+        }
+        request_body = json.dumps(request, ensure_ascii=False, indent=2)
         try:
-            with client.messages.stream(
-                model=model, max_tokens=32_000, system=CRITERIA,
-                output_config={"format": {"type": "json_schema", "schema": AUDIT_SCHEMA}},
-                messages=[{"role": "user", "content": content}],
-            ) as stream:
+            with client.messages.stream(**request) as stream:
                 message = stream.get_final_message()
         except anthropic.APIError as err:
             sys.exit(f"audit failed: {type(err).__name__} — {err}")
@@ -459,6 +477,7 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
             body = next(b.text for b in message.content if b.type == "text")
         except StopIteration:
             sys.exit("audit returned no verdict")
+        exchanges.append(AiExchange(request_body=request_body, response_body=body))
         if redact:                       # restore real names locally — the vendor never saw them
             body = apply_map(body, redact, reverse=True)
         try:
@@ -486,6 +505,7 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
         ),
         checks=checks,
         code_step_order=tuple(verdict.get("code_step_order", ())),
+        ai_exchanges=tuple(exchanges),
     )
 
 
@@ -577,9 +597,9 @@ def scheduler_names(sources: dict[str, str]) -> set[str]:
 
 
 def outbound_urls(text: str) -> dict[str, str]:
-    # TODO: outbound HTTP integrations (Feign/REST) from config `<service>: url: http…`, including
-    # library clients (Atlas) with no @FeignClient here. Only http(s) values — a JDBC datasource,
-    # a ${...} placeholder, or an auth endpoint is NOT a REST call and is excluded.
+    # TODO: resolve the endpoint behind a client — config confirms the binding (which host a call
+    # actually lands on), it does NOT discover integrations. Only http(s) values: a JDBC datasource,
+    # a ${...} placeholder, or an auth endpoint is not a REST call.
     infra = {"datasource", "mongodb", "redis", "r2dbc", "flyway", "liquibase"}
     stack: list[tuple[int, str]] = []
     urls: dict[str, str] = {}
@@ -598,11 +618,27 @@ def outbound_urls(text: str) -> dict[str, str]:
     return urls
 
 
+CALL_RE = re.compile(r"\b([a-z]\w*?)(?:Client|Api|Gateway|Feign)\s*\.\s*\w+\s*\(")   # fluent calls wrap lines
+GENERIC_RECEIVERS = {"web", "rest", "http", "feign", "oauth", "mongo", "kafka", "redis", "vault",
+                     "discovery"}   # framework plumbing, never a named integration
+
+
+def outbound_clients(sources: dict[str, str]) -> tuple[str, ...]:
+    # TODO: outbound integrations are discovered in the CODE — every invoked *Client/*Api/*Gateway call
+    # site, whether it is a local @FeignClient or a shared library client with no annotation here. A url
+    # sitting in config with no call behind it is config hygiene, not architecture, and is not our job.
+    return tuple(sorted(
+        {tok.lower() for path, body in sources.items() if path.endswith(".java")
+         for tok in CALL_RE.findall(body)} - GENERIC_RECEIVERS
+    ))
+
+
 def client_method(token: str, sources: dict[str, str]) -> str:
     # TODO: the business step is the invoked client method — e.g. AtlasClient.getNationalExchangeRate();
     # name it from the import (class) + the call site (method), since library clients have no local paths.
     tok = token.replace("-", "").lower()
-    call_re = re.compile(rf"\b\w*{re.escape(tok)}\w*[Cc]lient\.(\w+)\s*\(")
+    call_re = re.compile(rf"\b{re.escape(tok)}(?:client|api|gateway|feign)\s*\.\s*(\w+)\s*\(",
+                         re.IGNORECASE)   # receiver is camelCase; the token is its normalised prefix
     candidates, methods = set(), set()
     for path, body in sources.items():
         if not path.endswith(".java"):
@@ -621,24 +657,36 @@ def client_method(token: str, sources: dict[str, str]) -> str:
 
 def cross_check_clients(audit: Audit, urls: dict[str, str], sources: dict[str, str],
                         service: str) -> Audit:
-    # TODO: deterministic guarantee for outbound integrations (the model drops library clients like
-    # Atlas at random) — any config url the model never accounted for is undrawn drift, named by the
-    # invoked client method (the business step). accounted-for = a real coverage signal (check row,
-    # extra, dormant, undrawn flow), NOT the loose summary prose.
-    seen = " ".join((*audit.extra, *audit.dormant,
-                     *(f"{c.expected} {c.actual}" for c in audit.checks),
-                     *(f"{s} {t}" for _, hops in audit.undrawn_flows for s, _, t in hops))).lower()
-    flows, checks = list(audit.undrawn_flows), list(audit.checks)
-    for token, url in urls.items():
-        endpoint = re.sub(r"^https?://", "", url).rstrip("/")   # host + base path, e.g. pre.atlas…az/api
+    # TODO: deterministic guarantee for outbound integrations (the model drops clients at random) —
+    # every client invoked in code that the model never accounted for is undrawn drift, named by the
+    # invoked method (the business step) and, when config resolves one, the endpoint it lands on.
+    # accounted-for = a finding the reader actually SEES (check row, dormant, undrawn flow); the
+    # model's loose "extra" prose does not qualify — a precise deterministic row replaces it.
+    covered = " ".join((*audit.dormant,
+                        *(f"{c.expected} {c.actual}" for c in audit.checks),
+                        *(f"{s} {t}" for _, hops in audit.undrawn_flows for s, _, t in hops))).lower()
+
+    def _endpoint(token: str) -> str:
+        # TODO: binding side — the configured host+path for this client, blank when it is Vault-held
+        # or simply never configured. A missing value hides the endpoint, never the integration.
+        match = next((u for key, u in urls.items() if key.replace("-", "") in token
+                      or token in key.replace("-", "")), "")
+        return re.sub(r"^https?://", "", match).rstrip("/")
+
+    flows, checks, extra = list(audit.undrawn_flows), list(audit.checks), list(audit.extra)
+    for token in outbound_clients(sources):
+        endpoint = _endpoint(token)
         host = endpoint.split("/")[0]
-        if token in seen or host in seen:            # model mapped it to a drawn component / reported it
-            continue
-        step = client_method(token, sources) or token           # business step: the invoked lib method
-        flows.append((f"{token} (undrawn)", ((service, "REST", f"{step}  ·  {endpoint}"),)))
+        if token in covered or (host and host in covered):
+            continue                                 # model mapped it to a drawn component / reported it
+        extra = [e for e in extra if token not in e.lower()]    # the precise row supersedes the prose
+        step = client_method(token, sources) or token           # business step: the invoked method
+        where = f" at {endpoint}" if endpoint else ""
+        flows.append((f"{token} (undrawn)",
+                      ((service, "REST", f"{step}  ·  {endpoint}" if endpoint else step),)))
         checks.append(Check(Dim.FLOWS, Status.FAIL, "(not in HLD)",
-                            f"{service} calls {step} at {endpoint} — outbound call not drawn"))
-    return replace(audit, undrawn_flows=tuple(flows), checks=tuple(checks))
+                            f"{service} calls {step}{where} — outbound call not drawn"))
+    return replace(audit, undrawn_flows=tuple(flows), checks=tuple(checks), extra=tuple(extra))
 
 
 def topic_diff(diagram: Diagram, sources: dict[str, str], consul: str | None,
@@ -698,9 +746,9 @@ def enforce_hints(audit: Audit, hints: tuple[str, ...], directions: dict[str, se
 
 
 def cross_check_names(not_bound: tuple[str, ...], undrawn: tuple[str, ...]) -> tuple[Check, ...]:
-    # TODO: render the deterministic topic diff as aggregated contract rows.
+    # TODO: render the deterministic topic diff as aggregated binding rows.
     return tuple(
-        Check(Dim.CONTRACTS, Status.FAIL, expected, f"{actual}: {', '.join(names)}")
+        Check(Dim.BINDINGS, Status.FAIL, expected, f"{actual}: {', '.join(names)}")
         for names, expected, actual in (
             (not_bound, "every drawn topic bound in config", "not bound anywhere"),
             (undrawn, "only drawn topics bound in config", "config binds undrawn"),
@@ -734,7 +782,7 @@ UNRESOLVED_RE = re.compile(r"\$\{|placeholder|unresolved|vault", re.IGNORECASE)
 
 
 def enforce_qualifiers(audit: Audit) -> Audit:
-    # TODO: a label's namespace qualifier ("[birbank-backend]") is a deterministic contract — the
+    # TODO: a label's namespace qualifier ("[team-namespace]") is a deterministic check — the
     # model must NOT judge it (it flip-flops). For an existing component with a RESOLVED value we own
     # the verdict: namespace present -> pass, absent -> warn. A placeholder/vault value can't be judged
     # (our rule: it proves nothing, never a mismatch) -> pass; genuinely missing -> leave as-is.
@@ -761,6 +809,47 @@ def neutralize_placeholders(audit: Audit) -> Audit:
         if c.status is Status.WARN and UNRESOLVED_RE.search(c.actual) else c
         for c in audit.checks
     ))
+
+
+DECL_RE = re.compile(r"\b([A-Z]\w*?(?:Client|Api|Gateway))\b")
+
+
+def dead_clients(sources: dict[str, str]) -> tuple[str, ...]:
+    # TODO: a client type that is declared or injected but whose methods are never called is dead code,
+    # not an integration — an unwired bean draws no arrow. Name them so findings about them can be
+    # dropped rather than scored as drift, whatever the model decided.
+    invoked = outbound_clients(sources)
+    declared = {cls for path, body in sources.items() if path.endswith(".java")
+                for cls in DECL_RE.findall(body)}
+    return tuple(sorted(
+        cls for cls in declared
+        if (stem := re.sub(r"(?:Client|Api|Gateway)$", "", cls).lower())
+        and stem not in GENERIC_RECEIVERS
+        and not any(tok in stem or stem in tok for tok in invoked)
+    ))
+
+
+def suppress_dead_clients(audit: Audit, sources: dict[str, str]) -> Audit:
+    # TODO: drop every finding that names a dead client and record it as dormant instead, so the
+    # "dead code is never a penalty" rule holds on any model tier rather than by the model's goodwill.
+    if not (dead := dead_clients(sources)):
+        return audit
+    stems = tuple(re.sub(r"(?:Client|Api|Gateway)$", "", c).lower() for c in dead)
+
+    def _names(text: str) -> bool:
+        # TODO: does this finding talk about a client nothing actually calls?
+        return any(stem in text.lower() for stem in stems)
+
+    return replace(
+        audit,
+        dormant=(*audit.dormant, *(f"{c} (declared, never called)" for c in dead)),
+        extra=tuple(e for e in audit.extra if not _names(e)),
+        checks=tuple(c for c in audit.checks
+                     if c.status is Status.PASS or not _names(f"{c.expected} {c.actual}")),
+        undrawn_flows=tuple(
+            fl for fl in audit.undrawn_flows
+            if not _names(f"{fl[0]} " + " ".join(" ".join(hop) for hop in fl[1]))),
+    )
 
 
 def suppress_dormant(audit: Audit) -> Audit:
@@ -883,6 +972,12 @@ def render(console: Console, service: str, diagram: Diagram, audit: Audit, total
         console.print(Padding(chain, (0, 4)))
         console.print()
 
+    # ── standalone undrawn integrations: scored, so never silent ──
+    for item in audit.extra:
+        console.print(Padding(Text.assemble(("⌁ UNDRAWN  ", "yellow bold"), (item, "yellow")), (0, 2)))
+    if audit.extra:
+        console.print()
+
     # ── collapsed positives + operational notices ──
     verified = sum(c.status is Status.PASS for c in audit.checks)
     tail = [f"[green]✓ {verified} verified[/]"]
@@ -901,12 +996,190 @@ def render(console: Console, service: str, diagram: Diagram, audit: Audit, total
     console.print()
 
 
+def render_ai_io(console: Console, exchanges: tuple[AiExchange, ...]) -> None:
+    # TODO: opt-in audit trail — show exactly what crossed the model boundary, not the locally
+    # restored report. Multiple calls (the corrective retry) stay inside the same two blocks.
+    def _document(attribute: str, label: str) -> str:
+        bodies = []
+        for number, exchange in enumerate(exchanges, 1):
+            raw = getattr(exchange, attribute)
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                body = raw
+            bodies.append({"call": number, label: body})
+        value = bodies[0][label] if len(bodies) == 1 else bodies
+        return json.dumps(value, ensure_ascii=False, indent=2)
+
+    console.rule("[bold cyan]MODEL I/O AUDIT[/]")
+    console.print(Padding(
+        "[dim]Full payloads may contain source and runtime config. Keep --show-ai-io out of shared CI logs.[/]",
+        (0, 2, 1, 2),
+    ))
+    console.print(Panel(
+        Syntax(_document("request_body", "request"), "json", theme="ansi_dark",
+               word_wrap=True, background_color="default"),
+        title="[bold cyan]REQUEST BODY · outbound after --redact[/]",
+        border_style="cyan",
+        padding=(1, 1),
+    ))
+    console.print(Panel(
+        Syntax(_document("response_body", "response"), "json", theme="ansi_dark",
+               word_wrap=True, background_color="default"),
+        title="[bold magenta]RESPONSE BODY · raw before local name restore[/]",
+        border_style="magenta",
+        padding=(1, 1),
+    ))
+    console.print()
+
+
+def render_html(path: Path, service: str, diagram: Diagram, audit: Audit, total: int,
+                per_dim: dict[Dim, int | None], penalty: int, threshold: int,
+                profile: str, notices: list[str]) -> None:
+    # TODO: the ArchCom-facing artifact — the exact same report as the terminal, as ONE self-contained
+    # HTML file (inline CSS, no CDN, no requests: nothing leaves the machine) that a CI job attaches
+    # to the merge request so reviewers click a link instead of reading terminal scrollback.
+    esc = html.escape
+    passed = total >= threshold
+    grade = ("CLEAN" if total >= 90 else "PASSING" if passed
+             else "DRIFTING" if total >= 50 else "BROKEN")
+    ICON = {Status.PASS: ("●", "ok"), Status.WARN: ("▲", "warn"), Status.FAIL: ("✕", "fail")}
+
+    def _meter(dim: Dim) -> str:
+        # TODO: one magnitude bar per dimension — value label always beside it, never color alone.
+        if (v := per_dim[dim]) is None:
+            return (f'<div class="meter"><span class="mlab">{dim.value}</span>'
+                    f'<div class="track"></div><span class="mval">—</span></div>')
+        cls = "ok" if v >= 80 else "warn" if v >= 50 else "fail"
+        return (f'<div class="meter"><span class="mlab">{dim.value}</span>'
+                f'<div class="track"><div class="fill {cls}" style="width:{v}%"></div></div>'
+                f'<span class="mval">{v}%</span></div>')
+
+    def _section(dim: Dim) -> str:
+        # TODO: same ordering discipline as the terminal — failures first, passes recede.
+        rows = sorted((c for c in audit.checks if c.dimension is dim),
+                      key=lambda c: (c.status is not Status.FAIL, c.status is not Status.WARN))
+        if not rows:
+            return ""
+        body = "\n".join(
+            f'<tr><td class="ic {ICON[c.status][1]}">{ICON[c.status][0]}</td>'
+            f'<td class="exp{"" if c.status is not Status.PASS else " dim"}">{esc(c.expected)}</td>'
+            f'<td class="act">{esc(_polish(c.actual))}</td></tr>'
+            for c in rows)
+        return f'<h2>{dim.value}</h2><table>{body}</table>'
+
+    def _chain(title: str, hops: tuple[Hop, ...]) -> str:
+        # TODO: an undrawn pipeline reads as the chain of component hops the diagram is missing.
+        parts = [f'<span class="pill">{esc(hops[0][0])}</span>'] if hops else []
+        parts += [f'<span class="mech">{esc(mech)} ▸</span><span class="pill">{esc(target)}</span>'
+                  for _, mech, target in hops]
+        return (f'<div class="flow"><div class="ftitle">⌁ undrawn flow · {esc(title)}</div>'
+                f'<div class="chain">{"".join(parts)}</div></div>')
+
+    verified = sum(c.status is Status.PASS for c in audit.checks)
+    plain_notices = [re.sub(r"\[/?[^\]]*\]", "", n) for n in notices]
+    footer = "  ·  ".join(filter(None, (
+        f"✓ {verified} verified",
+        f"○ {len(audit.dormant)} dormant: {esc(', '.join(audit.dormant))}" if audit.dormant else "",
+        f"drift −{penalty}" if penalty else "",
+        f"scope {len(diagram.components)} components · {len(diagram.edges)} flows "
+        f"· {len(diagram.steps)} steps",
+        *map(esc, plain_notices))))
+    extras = "\n".join(f'<div class="extra">⌁ {esc(item)}</div>' for item in audit.extra)
+    flows = "\n".join(_chain(t, h) for t, h in audit.undrawn_flows)
+
+    path.write_text(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>archdrift · {esc(service)}</title><style>
+:root{{color-scheme:light;--page:#f9f9f7;--card:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;
+--muted:#898781;--hairline:#e1e0d9;--ring:rgba(11,11,11,.10);
+--ok:#0ca30c;--warn:#fab219;--fail:#d03b3b;--track:#eceae4}}
+@media (prefers-color-scheme:dark){{:root{{color-scheme:dark;--page:#0d0d0d;--card:#1a1a19;
+--ink:#fff;--ink2:#c3c2b7;--hairline:#2c2c2a;--ring:rgba(255,255,255,.10);--track:#2c2c2a}}}}
+*{{box-sizing:border-box;margin:0}}
+body{{background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:32px 16px}}
+main{{max-width:1080px;margin:auto;background:var(--card);border:1px solid var(--ring);border-radius:12px;padding:32px 36px}}
+header{{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}}
+header .svc{{font-weight:700}} header .prof,header .tool{{color:var(--muted);font-size:13px}}
+.hero{{display:flex;align-items:baseline;gap:14px;margin:18px 0 4px;flex-wrap:wrap}}
+.hero .score{{font-size:44px;font-weight:700;color:var(--{'ok' if passed else 'fail'})}}
+.hero .grade{{font-weight:700;font-size:18px;color:var(--{'ok' if passed else 'fail'})}}
+.hero .gate{{color:var(--muted)}} .summary{{color:var(--ink2);max-width:70ch;margin-bottom:22px}}
+.meter{{display:grid;grid-template-columns:110px 1fr 52px;gap:12px;align-items:center;margin:6px 0}}
+.mlab{{font-weight:600;font-size:13px}} .mval{{font-variant-numeric:tabular-nums;text-align:right;font-size:13px;color:var(--ink2)}}
+.track{{height:8px;border-radius:4px;background:var(--track);overflow:hidden}}
+.fill{{height:100%;border-radius:4px}} .fill.ok{{background:var(--ok)}} .fill.warn{{background:var(--warn)}} .fill.fail{{background:var(--fail)}}
+h2{{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:26px 0 8px}}
+table{{width:100%;border-collapse:collapse}} td{{padding:6px 10px 6px 0;vertical-align:top;border-top:1px solid var(--hairline)}}
+td.ic{{width:22px;font-size:12px}} .ic.ok{{color:var(--ok)}} .ic.warn{{color:var(--warn)}} .ic.fail{{color:var(--fail)}}
+td.exp{{width:42%;font-weight:500}} td.exp.dim{{font-weight:400}} td.act{{color:var(--ink2)}}
+.flow{{margin:14px 0}} .ftitle{{font-weight:600;color:var(--warn);font-size:13px;margin-bottom:6px}}
+.extra{{color:var(--warn);font-size:13px;margin:6px 0}}
+.chain{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+.pill{{border:1px solid var(--hairline);border-radius:6px;padding:2px 10px;font-size:13px;font-weight:500}}
+.mech{{color:var(--muted);font-size:12px}}
+footer{{margin-top:28px;padding-top:14px;border-top:1px solid var(--hairline);color:var(--muted);font-size:13px}}
+</style></head><body><main>
+<header><span class="tool">archdrift</span><span class="svc">{esc(service)}</span>
+<span class="prof">{esc(profile)}</span></header>
+<div class="hero"><span class="score">{total}%</span><span class="grade">{grade}</span>
+<span class="gate">gate {threshold}%</span></div>
+<p class="summary">{esc(audit.summary)}</p>
+{"".join(_meter(d) for d in Dim)}
+{"".join(_section(d) for d in Dim)}
+{f'<h2>undrawn</h2>{flows}{extras}' if flows or extras else ''}
+<footer>{footer}</footer>
+</main></body></html>""", encoding="utf-8")
+
+
 # ── entrypoint ───────────────────────────────────────────────────────────────
 
 
 def _env(key: str, fallback: str = "") -> str:
     # TODO: 12-factor config — environment-specific values come from ARCHDRIFT_* env vars.
     return os.environ.get(f"ARCHDRIFT_{key}", fallback)
+
+
+def run_gate(root: Path, diagram_path: Path, *, service: str | None = None, project: str = "",
+             profile: str = "preprod", consul_url: str | None = None,
+             model: str = "claude-sonnet-5", redact_spec: str = "", no_consul: bool = False,
+             ) -> tuple[str, Diagram, Audit, int, dict[Dim, int | None], int, list[str]]:
+    # TODO: the whole gate as ONE callable — the CLI and the web UI share this pipeline verbatim,
+    # so a browser run can never drift from what CI enforces.
+    service = service or root.resolve().name
+    diagram = scope_to_service(parse_diagram(diagram_path), service)
+    if not diagram.components:
+        raise ValueError(f"'{service}' has no arrows in the diagram — check the box label "
+                         f"or pass a service name that matches a drawn component.")
+    sources = harvest_codebase(root)
+    kv_url = consul_url and consul_url.format(project=project, service=service, profile=profile)
+    consul = fetch_consul(kv_url) if kv_url and not no_consul else None
+    not_bound, undrawn_names = topic_diff(diagram, sources, consul, service)
+    config = _config_text(sources, consul)
+    directions, urls = bound_topics(config), outbound_urls(config)
+    schedulers = scheduler_names(sources)
+    redact = redaction_map(redact_spec) if redact_spec else {}
+    audit = run_audit(diagram, sources, consul, service, model, undrawn_names, redact)
+    audit = enforce_hints(audit, undrawn_names, directions, schedulers, service)
+    audit = cross_check_clients(audit, urls, sources, service)
+    audit = replace(audit, checks=(
+        *audit.checks,
+        *cross_check_names(not_bound, undrawn_names),
+        *cross_check_directions(diagram, sources, consul, service),
+        *cross_check_steps(diagram),
+        *cross_check_order(diagram, audit.code_step_order),
+    ))
+    audit = suppress_dead_clients(audit, sources)
+    audit = neutralize_placeholders(enforce_qualifiers(suppress_dormant(audit)))
+
+    notices: list[str] = []
+    if not no_consul:
+        notices.append(
+            "[green]consul ✓[/]" if consul
+            else "[yellow]⚠ consul unreachable[/]" if kv_url
+            else "[yellow]⚠ consul not configured[/]")
+    total, per_dim, penalty = score(audit)
+    return service, diagram, audit, total, per_dim, penalty, notices
 
 
 def main() -> int:
@@ -931,6 +1204,11 @@ def main() -> int:
     cli.add_argument("--redact", default=_env("REDACT"),
                      help="comma-separated identifiers to mask before sending, e.g. "
                           "'acmecorp,internal.host' or 'acmecorp=org1'")
+    cli.add_argument("--show-ai-io", action="store_true",
+                     help="print the full redacted model request and raw response at the end; "
+                          "may expose source/config in terminal or CI logs")
+    cli.add_argument("--html", type=Path, default=Path(p) if (p := _env("HTML")) else None,
+                     help="also write the report as one self-contained HTML file (CI artifact)")
     cli.add_argument("--no-consul", action="store_true")
     cli.add_argument("--threshold", type=int, default=int(_env("THRESHOLD", "70")))
     cli.add_argument("--model", default=_env("MODEL", "claude-sonnet-5"))
@@ -940,44 +1218,22 @@ def main() -> int:
     if not (args.root and args.root.is_dir() and args.diagram and args.diagram.is_file()):
         cli.error("microservice and diagram paths required — pass them as arguments "
                   "or export ARCHDRIFT_MS / ARCHDRIFT_DIAGRAM")
-    service = args.service or args.root.resolve().name
-
     with console.status("[dim]parsing HLD → harvesting codebase → auditing…[/]"):
-        diagram = scope_to_service(parse_diagram(args.diagram), service)
-        if not diagram.components:
-            sys.exit(f"'{service}' has no arrows in the diagram — check the box label "
-                     f"or pass --service to match a drawn component.")
-        sources = harvest_codebase(args.root)
-        kv_url = args.consul_url and args.consul_url.format(
-            project=args.project, service=service, profile=args.profile)
-        consul = fetch_consul(kv_url) if kv_url and not args.no_consul else None
-        not_bound, undrawn_names = topic_diff(diagram, sources, consul, service)
-        config = _config_text(sources, consul)
-        directions, urls = bound_topics(config), outbound_urls(config)
-        schedulers = scheduler_names(sources)
-        redact = redaction_map(args.redact) if args.redact else {}
-        audit = run_audit(diagram, sources, consul, service, args.model, undrawn_names, redact)
-        audit = enforce_hints(audit, undrawn_names, directions, schedulers, service)
-        audit = cross_check_clients(audit, urls, sources, service)
-        audit = replace(audit, checks=(
-            *audit.checks,
-            *cross_check_names(not_bound, undrawn_names),
-            *cross_check_directions(diagram, sources, consul, service),
-            *cross_check_steps(diagram),
-            *cross_check_order(diagram, audit.code_step_order),
-        ))
-        audit = neutralize_placeholders(enforce_qualifiers(suppress_dormant(audit)))
-
-    # operational notices fold into the report footer
-    notices: list[str] = []
-    if not args.no_consul:
-        notices.append(
-            "[green]consul ✓[/]" if consul
-            else "[yellow]⚠ consul unreachable[/]" if kv_url
-            else "[yellow]⚠ consul not configured[/]")
-    total, per_dim, penalty = score(audit)
+        try:
+            service, diagram, audit, total, per_dim, penalty, notices = run_gate(
+                args.root, args.diagram, service=args.service, project=args.project,
+                profile=args.profile, consul_url=args.consul_url, model=args.model,
+                redact_spec=args.redact or "", no_consul=args.no_consul)
+        except ValueError as err:
+            sys.exit(str(err))
     render(console, service, diagram, audit, total, per_dim, penalty,
            args.threshold, args.profile, notices)
+    if args.html:
+        render_html(args.html, service, diagram, audit, total, per_dim, penalty,
+                    args.threshold, args.profile, notices)
+        console.print(Padding(f"[dim]html report → {args.html}[/]", (0, 2)))
+    if args.show_ai_io:
+        render_ai_io(console, audit.ai_exchanges)
     return 0 if total >= args.threshold else 1
 
 

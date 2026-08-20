@@ -12,7 +12,7 @@
 
   <!-- service -->
   <rect x="60" y="212" width="200" height="60" rx="11" fill="#dae8fc" stroke="#6c8ebf" stroke-width="1.5"/>
-  <text x="160" y="248" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1a3a5c">ms-debt-process-starter</text>
+  <text x="160" y="248" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1a3a5c">ms-example-service</text>
 
   <!-- Oracle cylinder -->
   <path d="M610,120 v44 a100,11 0 0 0 200,0 v-44" fill="#d5e8d4" stroke="#82b366" stroke-width="1.5"/>
