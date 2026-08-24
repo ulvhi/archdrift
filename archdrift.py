@@ -1104,7 +1104,7 @@ header .svc{{font-weight:700}} header .prof,header .tool{{color:var(--muted);fon
 .hero{{display:flex;align-items:baseline;gap:14px;margin:18px 0 4px;flex-wrap:wrap}}
 .hero .score{{font-size:44px;font-weight:700;color:var(--{'ok' if passed else 'fail'})}}
 .hero .grade{{font-weight:700;font-size:18px;color:var(--{'ok' if passed else 'fail'})}}
-.hero .gate{{color:var(--muted)}} .summary{{color:var(--ink2);max-width:70ch;margin-bottom:22px}}
+.summary{{color:var(--ink2);max-width:70ch;margin-bottom:22px}}
 .meter{{display:grid;grid-template-columns:110px 1fr 52px;gap:12px;align-items:center;margin:6px 0}}
 .mlab{{font-weight:600;font-size:13px}} .mval{{font-variant-numeric:tabular-nums;text-align:right;font-size:13px;color:var(--ink2)}}
 .track{{height:8px;border-radius:4px;background:var(--track);overflow:hidden}}
@@ -1122,8 +1122,7 @@ footer{{margin-top:28px;padding-top:14px;border-top:1px solid var(--hairline);co
 </style></head><body><main>
 <header><span class="tool">archdrift</span><span class="svc">{esc(service)}</span>
 <span class="prof">{esc(profile)}</span></header>
-<div class="hero"><span class="score">{total}%</span><span class="grade">{grade}</span>
-<span class="gate">gate {threshold}%</span></div>
+<div class="hero"><span class="score">{total}%</span><span class="grade">{grade}</span></div>
 <p class="summary">{esc(audit.summary)}</p>
 {"".join(_meter(d) for d in Dim)}
 {"".join(_section(d) for d in Dim)}

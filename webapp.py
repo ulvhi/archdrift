@@ -67,21 +67,62 @@ def fetch_repo(base: str, token: str, project_id: int, ref: str) -> Path:
     return inner[0] if len(inner) == 1 else dest
 
 
+def _gitlab_file_raw(base: str, token: str, spec: str) -> bytes | None:
+    # TODO: the web /-/raw/ endpoint wants a browser session, not a read_api token — it 302s to the
+    # sign-in page. Rewrite the pasted link onto the API raw endpoint, which the token CAN open.
+    # A branch name may itself contain slashes, so try every ref/path split until one answers.
+    project, _, rest = urllib.parse.urlsplit(spec).path.lstrip("/").partition("/-/raw/")
+    if not rest:
+        return None
+    proj = urllib.parse.quote(project, safe="")
+    parts = rest.split("/")
+    for i in range(1, len(parts)):
+        ref = urllib.parse.quote("/".join(parts[:i]), safe="")
+        file_path = urllib.parse.quote("/".join(parts[i:]), safe="")
+        url = f"{base}/api/v4/projects/{proj}/repository/files/{file_path}/raw?ref={ref}"
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers={"PRIVATE-TOKEN": token}), timeout=30) as r:
+                return r.read()
+        except urllib.error.HTTPError as err:
+            if err.code == 404:
+                continue                       # wrong ref/path split — try the next candidate
+            raise
+    return None
+
+
 def fetch_diagram(spec: str, base: str, token: str) -> Path:
-    # TODO: the HLD source is a local path or a URL; a same-host URL gets the token so a .drawio
-    # kept in a private repo works with its raw link.
+    # TODO: the HLD source is a local path or a URL. Devs paste the viewer link they're looking at,
+    # not the raw one — /-/blob/ is normalised to /-/raw/, and a same-host GitLab link is fetched
+    # through the API raw endpoint so a plain read_api token opens private repos.
     if spec.startswith(("http://", "https://")):
+        spec = spec.replace("/-/blob/", "/-/raw/", 1).split("?", 1)[0]
         same_host = urllib.parse.urlsplit(spec).netloc == urllib.parse.urlsplit(base).netloc
-        req = urllib.request.Request(
-            spec, headers={"PRIVATE-TOKEN": token} if token and same_host else {})
+        if same_host and token and (data := _gitlab_file_raw(base, token, spec)) is not None:
+            body = data
+        else:
+            req = urllib.request.Request(
+                spec, headers={"PRIVATE-TOKEN": token} if token and same_host else {})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read()
+        if body.lstrip()[:15].lower().startswith((b"<!doctype html", b"<html")):
+            raise ValueError("the URL returned a web page, not a .drawio file — for a private repo "
+                             "make sure the link points at the file and the token can read it")
         out = Path(tempfile.mkstemp(prefix="archdrift-", suffix=".drawio")[1])
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            out.write_bytes(resp.read())
+        out.write_bytes(body)
         return out
     path = Path(spec).expanduser()
     if not path.is_file():
         raise ValueError(f"diagram not found: {path}")
     return path
+
+
+def anthropic_models() -> list[dict]:
+    # TODO: the model dropdown is whatever the account can actually run — served live from the
+    # Models API rather than hardcoded, so new releases appear without touching this file.
+    import anthropic
+    return [{"id": m.id, "name": m.display_name}
+            for m in anthropic.Anthropic().models.list()]   # auto-paginates, newest first
 
 
 # ── the page ─────────────────────────────────────────────────────────────────
@@ -110,7 +151,17 @@ button:disabled{opacity:.5;cursor:default}
 border-radius:50%;animation:r .8s linear infinite;vertical-align:-2px;margin-right:6px}
 @keyframes r{to{transform:rotate(360deg)}}
 iframe{width:100%;height:1200px;border:0;border-radius:12px;background:var(--card);display:none}
-</style></head><body><main>
+/* hero: just the wordmark */
+.hero{padding:40px 16px 26px;text-align:center}
+.hero h1{font-size:clamp(48px,8vw,92px);font-weight:900;letter-spacing:-.045em;line-height:1.02;
+margin:0;color:var(--ink)}
+.hero h1 em{font-style:normal;color:var(--accent)}
+@media (prefers-color-scheme:dark){
+.hero h1 em{text-shadow:0 0 14px color-mix(in srgb,var(--accent) 55%,transparent),
+0 0 36px color-mix(in srgb,var(--accent) 30%,transparent)}}
+</style></head><body>
+<header class="hero"><h1>arch<em>drift</em></h1></header>
+<main>
 <div class="card"><h1>archdrift <small>architecture match gate — pick a service, run the audit</small></h1>
 <form id="f">
 <label>namespace / group
@@ -120,25 +171,33 @@ iframe{width:100%;height:1200px;border:0;border-radius:12px;background:var(--car
 <label>branch <input id="ref" value="testing" required></label>
 <label style="grid-column:span 2">HLD diagram — local path or URL
 <input id="drawio" placeholder="~/Desktop/service-HLD.drawio  ·  https://…/raw/…/hld.drawio" required></label>
-<label>consul profile <input id="profile" value="__PROFILE__"></label>
-<label>consul project — auto from group <input id="project" value="__PROJECT__"></label>
+<label>consul profile <select id="profile" data-def="__PROFILE__">
+<option value="dev">application-dev</option>
+<option value="load">application-load</option>
+<option value="preprod" selected>application-preprod</option>
+<option value="prod">application-prod</option>
+<option value="qa">application-qa</option>
+</select></label>
 <label>model <select id="model">
-<option value="claude-haiku-4-5">claude-haiku-4-5 · cheap</option>
-<option value="claude-sonnet-5" selected>claude-sonnet-5 · gate</option></select></label>
-<label>gate % <input id="threshold" type="number" value="__THRESHOLD__" min="0" max="100"></label>
-<div class="row"><button id="go">run audit</button><span id="status">__SETUP__</span></div>
+<option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+<option value="claude-sonnet-5" selected>Claude Sonnet 5</option></select></label>
+<div class="row"><button id="go">run</button><span id="status">__SETUP__</span></div>
 </form></div>
 <iframe id="report" title="archdrift report"></iframe>
 <script>
 const $=id=>document.getElementById(id), status=(t,err)=>{ $("status").innerHTML=t; $("status").className=err?"err":""; };
 const api=async(p)=>{const r=await fetch(p); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j;};
+{const d=$("profile").dataset.def; if([...$("profile").options].some(o=>o.value===d)) $("profile").value=d;}
+(async()=>{try{  // live model list from the Models API; the two hardcoded options stay as fallback
+  const ms=await api("/api/models");
+  if(ms.length) $("model").innerHTML=ms.map(m=>
+    `<option value="${m.id}"${m.id==="claude-sonnet-5"?" selected":""}>${m.name}</option>`).join("");
+}catch(e){}})();
 (async()=>{try{
   const groups=await api("/api/groups");
   $("group").innerHTML='<option value="">— choose —</option>'+groups.map(g=>`<option value="${g.id}">${g.full_path}</option>`).join("");
 }catch(e){status("groups: "+e.message,1)}})();
 $("group").onchange=async()=>{
-  const fp=$("group").selectedOptions[0]?.text||"";           // consul {project} = the group's own name
-  if(fp) $("project").value=fp.split("/").pop();
   $("proj").disabled=true; $("proj").innerHTML="<option>loading…</option>";
   try{
     const ps=await api("/api/projects?group="+$("group").value);
@@ -153,10 +212,12 @@ $("f").onsubmit=async ev=>{
   try{
     const r=await fetch("/api/run",{method:"POST",headers:{"content-type":"application/json"},
       body:JSON.stringify({project_id:+$("proj").value, ref:$("ref").value, service:$("proj").selectedOptions[0].text,
-        drawio:$("drawio").value, profile:$("profile").value, project:$("project").value,
-        model:$("model").value, threshold:+$("threshold").value})});
+        drawio:$("drawio").value, profile:$("profile").value,
+        project:($("group").selectedOptions[0]?.text||"").split("/").pop(),  // consul {project} = git group
+
+        model:$("model").value})});
     const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText);
-    status(j.passed?`done — ${j.total}% · PASSING`:`done — ${j.total}% · below gate`, !j.passed);
+    status(`done — ${j.total}% match`, !j.passed);
     $("report").srcdoc=j.html; $("report").style.display="block";
   }catch(e){status(e.message,1)}
   $("go").disabled=false;
@@ -193,10 +254,10 @@ def make_handler(cfg, engine):
                             "" if os.environ.get("ANTHROPIC_API_KEY")
                             else "⚠ export ANTHROPIC_API_KEY, then restart — audits will fail without it")))
                         page = (PAGE.replace("__PROFILE__", cfg.profile)
-                                    .replace("__PROJECT__", cfg.project)
-                                    .replace("__THRESHOLD__", str(cfg.threshold))
                                     .replace("__SETUP__", setup))
                         self._send(200, page.encode(), "text/html")
+                    case "/api/models":
+                        self._json(anthropic_models())
                     case "/api/groups":
                         groups = gl_pages(cfg.gitlab, cfg.token, "groups", order_by="path")
                         self._json(sorted(
@@ -224,7 +285,6 @@ def make_handler(cfg, engine):
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 root = fetch_repo(cfg.gitlab, cfg.token, body["project_id"], body["ref"])
                 diagram = fetch_diagram(body["drawio"], cfg.gitlab, cfg.token)
-                threshold = int(body.get("threshold") or cfg.threshold)
                 service, dgm, audit, total, per_dim, penalty, notices = engine.run_gate(
                     root, diagram,
                     service=body.get("service") or None,
@@ -236,11 +296,15 @@ def make_handler(cfg, engine):
                     no_consul=not cfg.consul_url)
                 report = Path(tempfile.mkstemp(prefix="archdrift-", suffix=".html")[1])
                 engine.render_html(report, service, dgm, audit, total, per_dim, penalty,
-                                   threshold, body.get("profile") or cfg.profile, notices)
-                self._json({"total": total, "passed": total >= threshold,
+                                   cfg.threshold, body.get("profile") or cfg.profile, notices)
+                self._json({"total": total, "passed": total >= cfg.threshold,
                             "html": report.read_text(encoding="utf-8")})
             except (ValueError, KeyError, urllib.error.URLError) as err:
                 self._json({"error": str(err)}, 400)
+            except SystemExit as err:
+                # the engine bails out with sys.exit() on model/API failures — surface the message
+                # instead of letting it kill the handler thread mid-response ("Failed to fetch")
+                self._json({"error": str(err) or "audit aborted"}, 500)
             except Exception as err:
                 self._json({"error": f"{type(err).__name__}: {err}"}, 500)
 
