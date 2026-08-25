@@ -168,7 +168,7 @@ margin:0;color:var(--ink)}
 <select id="group" required><option value="">loading groups…</option></select></label>
 <label>microservice
 <select id="proj" required disabled><option value="">pick a group first</option></select></label>
-<label>branch <input id="ref" value="testing" required></label>
+<label>branch <select id="ref" required disabled><option value="">pick a service first</option></select></label>
 <label style="grid-column:span 2">HLD diagram — local path or URL
 <input id="drawio" placeholder="~/Desktop/service-HLD.drawio  ·  https://…/raw/…/hld.drawio" required></label>
 <label>consul profile <select id="profile" data-def="__PROFILE__">
@@ -202,7 +202,17 @@ $("group").onchange=async()=>{
   try{
     const ps=await api("/api/projects?group="+$("group").value);
     $("proj").innerHTML=ps.map(p=>`<option value="${p.id}" data-ref="${p.default_branch||""}">${p.path}</option>`).join("");
-    $("proj").disabled=false; $("proj").onchange=()=>{const o=$("proj").selectedOptions[0]; if(o?.dataset.ref) $("ref").value=o.dataset.ref;};
+    $("proj").disabled=false;
+    $("proj").onchange=async()=>{
+      const o=$("proj").selectedOptions[0]; if(!o) return;
+      $("ref").disabled=true; $("ref").innerHTML="<option>loading…</option>";
+      try{
+        const bs=await api("/api/branches?project="+o.value);
+        const def=o.dataset.ref||bs.find(b=>b.default)?.name||bs[0]?.name||"";  // repo-nun öz default branch-i
+        $("ref").innerHTML=bs.map(b=>`<option value="${b.name}"${b.name===def?" selected":""}>${b.name}</option>`).join("");
+      }catch(e){status("branches: "+e.message,1); $("ref").innerHTML='<option value="">—</option>'; return;}
+      $("ref").disabled=false;
+    };
     $("proj").onchange();
   }catch(e){status("projects: "+e.message,1)}
 };
@@ -258,6 +268,12 @@ def make_handler(cfg, engine):
                         self._send(200, page.encode(), "text/html")
                     case "/api/models":
                         self._json(anthropic_models())
+                    case "/api/branches":
+                        pid = urllib.parse.parse_qs(query)["project"][0]
+                        branches = gl_pages(cfg.gitlab, cfg.token,
+                                            f"projects/{pid}/repository/branches")
+                        self._json([{"name": br["name"], "default": br.get("default", False)}
+                                    for br in branches])
                     case "/api/groups":
                         groups = gl_pages(cfg.gitlab, cfg.token, "groups", order_by="path")
                         self._json(sorted(
