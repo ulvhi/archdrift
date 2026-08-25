@@ -210,8 +210,8 @@ class Check:
 
 @dataclass(slots=True, frozen=True)
 class AiExchange:
-    request_body: str    # exact structured payload assembled for the model; redaction already applied
-    response_body: str   # raw model JSON before local reverse-redaction
+    request_body: str
+    response_body: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -223,6 +223,7 @@ class Audit:
     checks: tuple[Check, ...] = ()
     code_step_order: tuple[str, ...] = ()                    # step ids in the order the CODE runs them
     ai_exchanges: tuple[AiExchange, ...] = ()
+    secrets_masked: int = 0                                  # credential values stubbed out of the payload
 
 
 # ── collectors ───────────────────────────────────────────────────────────────
@@ -370,6 +371,41 @@ def apply_map(text: str, mapping: dict[str, str], *, reverse: bool = False) -> s
     return text
 
 
+SECRET_KEYS = ("password", "passwd", "pwd", "secret", "token", "credential", "passphrase",
+               "apikey", "api-key", "api_key", "accesskey", "access-key", "access_key",
+               "privatekey", "private-key", "keystore", "truststore", "salt")
+
+SECRET_MASK = "${secret}"
+
+SECRET_RE = re.compile(
+    r"([\w.\-]*(?:" + "|".join(SECRET_KEYS) + r")[\w.\-]*\s*[:=](?!=)\s*['\"]?)"
+    r"([^\s'\"#,;)}\]]+)", re.IGNORECASE)
+KEEP_RE = re.compile(r"\$\{|^(?:https?|jdbc|mongodb|redis|amqp)|^(?:true|false|null|\d+)$"
+                     r"|^[|>][-+]?\d*$",
+                     re.IGNORECASE)
+URI_CRED_RE = re.compile(r"(://[^\s:/@]+:)([^\s:/@]+)(?=@)")
+PLACEHOLDER_RE = re.compile(r"\$\{")
+PEM_RE = re.compile(r"-----BEGIN[^-]*-----.*?-----END[^-]*-----", re.DOTALL)
+
+
+def scrub_secrets(text: str) -> tuple[str, int]:
+    masked = 0
+
+    def _mask(keep: re.Pattern):
+        def _sub(m: re.Match) -> str:
+            nonlocal masked
+            if keep.search(m[2]):
+                return m[0]
+            masked += 1
+            return m[1] + SECRET_MASK
+        return _sub
+
+    text = SECRET_RE.sub(_mask(KEEP_RE), text)
+    text = URI_CRED_RE.sub(_mask(PLACEHOLDER_RE), text)
+    text, pem_blocks = PEM_RE.subn(SECRET_MASK, text)
+    return text, masked + pem_blocks
+
+
 def fetch_consul(url: str) -> str | None:
     # TODO: pull deployed runtime config from live Consul KV; unreachable -> skip config checks, not the run.
     request = urllib.request.Request(url)
@@ -423,6 +459,7 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
               model: str, undrawn_hints: tuple[str, ...] = (),
               redact: dict[str, str] | None = None) -> Audit:
     # TODO: stream the evidence bundle to the model; reconcile its verdicts against the known scope.
+    masked_counts: list[int] = []
 
     def _bundle(extra_note: str = "") -> str:
         # TODO: assemble one citable evidence document — elements id-tagged, runtime truth last.
@@ -449,7 +486,9 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
                 + "\n".join(f"- {n}" for n in undrawn_hints) + "\n</undrawn_bindings>")
         if extra_note:
             blocks.append(extra_note)
-        return apply_map("\n\n".join(blocks), redact) if redact else "\n\n".join(blocks)
+        bundle, masked = scrub_secrets("\n\n".join(blocks))
+        masked_counts.append(masked)
+        return apply_map(bundle, redact) if redact else bundle
 
     client = anthropic.Anthropic()
     exchanges: list[AiExchange] = []
@@ -506,6 +545,7 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
         checks=checks,
         code_step_order=tuple(verdict.get("code_step_order", ())),
         ai_exchanges=tuple(exchanges),
+        secrets_masked=max(masked_counts, default=0),
     )
 
 
@@ -1172,6 +1212,8 @@ def run_gate(root: Path, diagram_path: Path, *, service: str | None = None, proj
     audit = neutralize_placeholders(enforce_qualifiers(suppress_dormant(audit)))
 
     notices: list[str] = []
+    if audit.secrets_masked:
+        notices.append(f"[dim]🔒 {audit.secrets_masked} secrets masked[/]")
     if not no_consul:
         notices.append(
             "[green]consul ✓[/]" if consul
