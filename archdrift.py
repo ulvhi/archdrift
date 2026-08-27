@@ -1091,6 +1091,10 @@ def render_html(path: Path, service: str, diagram: Diagram, audit: Audit, total:
     # HTML file (inline CSS, no CDN, no requests: nothing leaves the machine) that a CI job attaches
     # to the merge request so reviewers click a link instead of reading terminal scrollback.
     esc = html.escape
+
+    def soft(text: str) -> str:
+        return re.sub(r"([.\-_/])", r"\1<wbr>", esc(text))
+
     passed = total >= threshold
     grade = ("CLEAN" if total >= 90 else "PASSING" if passed
              else "DRIFTING" if total >= 50 else "BROKEN")
@@ -1114,17 +1118,17 @@ def render_html(path: Path, service: str, diagram: Diagram, audit: Audit, total:
             return ""
         body = "\n".join(
             f'<tr><td class="ic {ICON[c.status][1]}">{ICON[c.status][0]}</td>'
-            f'<td class="exp{"" if c.status is not Status.PASS else " dim"}">{esc(c.expected)}</td>'
-            f'<td class="act">{esc(_polish(c.actual))}</td></tr>'
+            f'<td class="exp{"" if c.status is not Status.PASS else " dim"}">{soft(c.expected)}</td>'
+            f'<td class="act">{soft(_polish(c.actual))}</td></tr>'
             for c in rows)
         return f'<h2>{dim.value}</h2><table>{body}</table>'
 
     def _chain(title: str, hops: tuple[Hop, ...]) -> str:
         # TODO: an undrawn pipeline reads as the chain of component hops the diagram is missing.
-        parts = [f'<span class="pill">{esc(hops[0][0])}</span>'] if hops else []
-        parts += [f'<span class="mech">{esc(mech)} ▸</span><span class="pill">{esc(target)}</span>'
+        parts = [f'<span class="pill">{soft(hops[0][0])}</span>'] if hops else []
+        parts += [f'<span class="mech">{esc(mech)} ▸</span><span class="pill">{soft(target)}</span>'
                   for _, mech, target in hops]
-        return (f'<div class="flow"><div class="ftitle">⌁ undrawn flow · {esc(title)}</div>'
+        return (f'<div class="flow"><div class="ftitle">⌁ undrawn flow · {soft(title)}</div>'
                 f'<div class="chain">{"".join(parts)}</div></div>')
 
     verified = sum(c.status is Status.PASS for c in audit.checks)
@@ -1136,7 +1140,7 @@ def render_html(path: Path, service: str, diagram: Diagram, audit: Audit, total:
         f"scope {len(diagram.components)} components · {len(diagram.edges)} flows "
         f"· {len(diagram.steps)} steps",
         *map(esc, plain_notices))))
-    extras = "\n".join(f'<div class="extra">⌁ {esc(item)}</div>' for item in audit.extra)
+    extras = "\n".join(f'<div class="extra">⌁ {soft(item)}</div>' for item in audit.extra)
     flows = "\n".join(_chain(t, h) for t, h in audit.undrawn_flows)
 
     path.write_text(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -1155,33 +1159,34 @@ header .svc{{font-weight:700}} header .prof,header .tool{{color:var(--muted);fon
 .hero{{display:flex;align-items:baseline;gap:14px;margin:18px 0 4px;flex-wrap:wrap}}
 .hero .score{{font-size:44px;font-weight:700;color:var(--{'ok' if passed else 'fail'})}}
 .hero .grade{{font-weight:700;font-size:18px;color:var(--{'ok' if passed else 'fail'})}}
-.summary{{color:var(--ink2);max-width:70ch;margin-bottom:8px}}
+.summary{{color:var(--ink2);margin-bottom:8px;overflow-wrap:break-word}}
 details.deep{{margin:0 0 22px}}
 details.deep summary{{cursor:pointer;color:var(--muted);font-size:13px;font-weight:600;list-style:none;width:fit-content}}
 details.deep summary::-webkit-details-marker{{display:none}}
 details.deep summary::before{{content:"▸ "}}
 details.deep[open] summary::before{{content:"▾ "}}
-details.deep p{{color:var(--ink2);max-width:80ch;margin:8px 0 0;font-size:14px}}
+details.deep p{{color:var(--ink2);margin:8px 0 0;font-size:14px;overflow-wrap:break-word}}
 .meter{{display:grid;grid-template-columns:110px 1fr 52px;gap:12px;align-items:center;margin:6px 0}}
 .mlab{{font-weight:600;font-size:13px}} .mval{{font-variant-numeric:tabular-nums;text-align:right;font-size:13px;color:var(--ink2)}}
 .track{{height:8px;border-radius:4px;background:var(--track);overflow:hidden}}
 .fill{{height:100%;border-radius:4px}} .fill.ok{{background:var(--ok)}} .fill.warn{{background:var(--warn)}} .fill.fail{{background:var(--fail)}}
 h2{{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:26px 0 8px}}
-table{{width:100%;border-collapse:collapse}} td{{padding:6px 10px 6px 0;vertical-align:top;border-top:1px solid var(--hairline)}}
+table{{width:100%;border-collapse:collapse}}
+td{{padding:6px 10px 6px 0;vertical-align:top;border-top:1px solid var(--hairline);overflow-wrap:break-word}}
 td.ic{{width:22px;font-size:12px}} .ic.ok{{color:var(--ok)}} .ic.warn{{color:var(--warn)}} .ic.fail{{color:var(--fail)}}
 td.exp{{width:42%;font-weight:500}} td.exp.dim{{font-weight:400}} td.act{{color:var(--ink2)}}
 .flow{{margin:14px 0}} .ftitle{{font-weight:600;color:var(--warn);font-size:13px;margin-bottom:6px}}
 .extra{{color:var(--warn);font-size:13px;margin:6px 0}}
 .chain{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
-.pill{{border:1px solid var(--hairline);border-radius:6px;padding:2px 10px;font-size:13px;font-weight:500}}
+.pill{{border:1px solid var(--hairline);border-radius:6px;padding:2px 10px;font-size:13px;font-weight:500;overflow-wrap:break-word}}
 .mech{{color:var(--muted);font-size:12px}}
 footer{{margin-top:28px;padding-top:14px;border-top:1px solid var(--hairline);color:var(--muted);font-size:13px}}
 </style></head><body><main>
 <header><span class="tool">archdrift</span><span class="svc">{esc(service)}</span>
 <span class="prof">{esc(profile)}</span></header>
 <div class="hero"><span class="score">{total}%</span><span class="grade">{grade}</span></div>
-<p class="summary">{esc(audit.summary)}</p>
-{f'<details class="deep"><summary>detailed</summary><p>{esc(audit.detail)}</p></details>' if audit.detail else '<div style="height:14px"></div>'}
+<p class="summary">{soft(audit.summary)}</p>
+{f'<details class="deep"><summary>detailed</summary><p>{soft(audit.detail)}</p></details>' if audit.detail else '<div style="height:14px"></div>'}
 {"".join(_meter(d) for d in Dim)}
 {"".join(_section(d) for d in Dim)}
 {f'<h2>undrawn</h2>{flows}{extras}' if flows or extras else ''}

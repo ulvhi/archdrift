@@ -227,6 +227,13 @@ post to a Teams channel <span class="soon">soon</span></button>
 <script>
 const $=id=>document.getElementById(id), status=(t,err)=>{ $("status").innerHTML=t; $("status").className=err?"err":""; };
 $("autorun").onclick=()=>{ $("autopanel").hidden=!$("autopanel").hidden; };
+// the report is same-origin (srcdoc): size the frame to its content so nothing is ever cut off,
+// and follow it as it grows — e.g. when the "detailed" section is expanded
+$("report").onload=()=>{ try{
+  const doc=$("report").contentDocument;
+  const fit=()=>{ $("report").style.height=Math.max(600,doc.documentElement.scrollHeight+2)+"px"; };
+  fit(); new ResizeObserver(fit).observe(doc.body);
+}catch(e){} };
 {const d=$("ar-days"); for(let i=1;i<=31;i++){ const b=document.createElement("button");
   b.type="button"; b.className="day"+([1,15].includes(i)?" on":""); b.textContent=i;
   b.onclick=()=>b.classList.toggle("on"); d.appendChild(b); }}
