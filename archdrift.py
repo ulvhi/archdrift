@@ -77,6 +77,11 @@ F1, …. Return:
 - binding_checks: one row per bound identifier you can verify (Kafka topic
   name, Feign service id, DB schema/collection) — expected = the drawn label,
   actual = the resolved binding. A renamed identifier is fail.
+- detail: a walkthrough of HOW the code implements the drawn flows, end to
+  end — per flow: the mechanism, the implementing class, where it sits in the
+  execution order, and the resolved binding it uses. 5-10 sentences of plain
+  prose. Same audience and style rules as "actual": component level, no
+  method signatures, no config key paths.
 Never omit a C-id or F-id; if unsure, use warn, never silence.
 
 "actual" is COMPONENT LEVEL: the implementing class plus the RESOLVED runtime
@@ -133,6 +138,10 @@ AUDIT_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string", "description": "Two-sentence architect's verdict."},
+        "detail": {"type": "string", "description":
+                   "Detailed walkthrough of HOW the code implements the drawn flows, end to "
+                   "end: mechanism, implementing class, execution order and resolved bindings "
+                   "per flow. 5-10 sentences, component-level, same style rules as 'actual'."},
         "component_verdicts": {"type": "array", "items": VERDICT_ITEM},
         "flow_verdicts": {"type": "array", "items": VERDICT_ITEM},
         "binding_checks": {
@@ -179,7 +188,7 @@ AUDIT_SCHEMA = {
             },
         },
     },
-    "required": ["summary", "component_verdicts", "flow_verdicts", "binding_checks",
+    "required": ["summary", "detail", "component_verdicts", "flow_verdicts", "binding_checks",
                  "code_step_order", "extra", "dormant", "undrawn_flows"],
     "additionalProperties": False,
 }
@@ -217,8 +226,9 @@ class AiExchange:
 @dataclass(slots=True, frozen=True)
 class Audit:
     summary: str
-    extra: tuple[str, ...]                                    # standalone active drift — scored
-    dormant: tuple[str, ...]                                  # dead code — informational, never scored
+    detail: str = ""                                          # longer flow walkthrough — collapsed in the report
+    extra: tuple[str, ...] = ()                               # standalone active drift — scored
+    dormant: tuple[str, ...] = ()                             # dead code — informational, never scored
     undrawn_flows: tuple[tuple[str, tuple[Hop, ...]], ...] = ()  # (title, hops)
     checks: tuple[Check, ...] = ()
     code_step_order: tuple[str, ...] = ()                    # step ids in the order the CODE runs them
@@ -536,6 +546,7 @@ def run_audit(diagram: Diagram, sources: dict[str, str], consul: str | None, ser
 
     return Audit(
         summary=verdict["summary"],
+        detail=verdict.get("detail", ""),
         extra=tuple(verdict["extra"]),
         dormant=tuple(verdict["dormant"]),
         undrawn_flows=tuple(
@@ -1144,7 +1155,13 @@ header .svc{{font-weight:700}} header .prof,header .tool{{color:var(--muted);fon
 .hero{{display:flex;align-items:baseline;gap:14px;margin:18px 0 4px;flex-wrap:wrap}}
 .hero .score{{font-size:44px;font-weight:700;color:var(--{'ok' if passed else 'fail'})}}
 .hero .grade{{font-weight:700;font-size:18px;color:var(--{'ok' if passed else 'fail'})}}
-.summary{{color:var(--ink2);max-width:70ch;margin-bottom:22px}}
+.summary{{color:var(--ink2);max-width:70ch;margin-bottom:8px}}
+details.deep{{margin:0 0 22px}}
+details.deep summary{{cursor:pointer;color:var(--muted);font-size:13px;font-weight:600;list-style:none;width:fit-content}}
+details.deep summary::-webkit-details-marker{{display:none}}
+details.deep summary::before{{content:"▸ "}}
+details.deep[open] summary::before{{content:"▾ "}}
+details.deep p{{color:var(--ink2);max-width:80ch;margin:8px 0 0;font-size:14px}}
 .meter{{display:grid;grid-template-columns:110px 1fr 52px;gap:12px;align-items:center;margin:6px 0}}
 .mlab{{font-weight:600;font-size:13px}} .mval{{font-variant-numeric:tabular-nums;text-align:right;font-size:13px;color:var(--ink2)}}
 .track{{height:8px;border-radius:4px;background:var(--track);overflow:hidden}}
@@ -1164,6 +1181,7 @@ footer{{margin-top:28px;padding-top:14px;border-top:1px solid var(--hairline);co
 <span class="prof">{esc(profile)}</span></header>
 <div class="hero"><span class="score">{total}%</span><span class="grade">{grade}</span></div>
 <p class="summary">{esc(audit.summary)}</p>
+{f'<details class="deep"><summary>detailed</summary><p>{esc(audit.detail)}</p></details>' if audit.detail else '<div style="height:14px"></div>'}
 {"".join(_meter(d) for d in Dim)}
 {"".join(_section(d) for d in Dim)}
 {f'<h2>undrawn</h2>{flows}{extras}' if flows or extras else ''}

@@ -146,6 +146,25 @@ input:focus,select:focus{outline:2px solid var(--accent);outline-offset:0;border
 .row{grid-column:1/-1;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 button{font:inherit;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:8px;padding:9px 22px;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}
+/* share row: appears with the report; actions are placeholders until wired up */
+#share{display:none;justify-content:flex-end;align-items:center;gap:10px;margin:0 0 12px}
+#share span.lbl{color:var(--muted);font-size:12px;margin-right:2px}
+.ghost{color:var(--ink2);background:transparent;border:1px solid var(--hairline);font-weight:500;
+padding:7px 14px;display:inline-flex;align-items:center;gap:8px}
+.ghost:disabled{opacity:.65;cursor:not-allowed}
+.soon{font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+border:1px solid var(--hairline);border-radius:999px;padding:1px 7px}
+/* auto-run: the button is real, the scheduling isn't yet — the panel only previews it */
+.head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+#autopanel{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:16px;
+padding:14px 16px;border:1px dashed var(--hairline);border-radius:10px}
+#autopanel[hidden]{display:none}
+#autopanel .note{color:var(--muted);font-size:12px;flex-basis:100%}
+#autopanel .lblx{font-size:12px;font-weight:600;color:var(--ink2);display:block;margin-bottom:6px}
+#ar-days{display:grid;grid-template-columns:repeat(7,38px);gap:6px;width:max-content}
+.day{width:38px;height:32px;border:1px solid var(--hairline);border-radius:8px;background:var(--page);
+color:var(--ink);font:inherit;font-size:13px;font-weight:500;padding:0;cursor:pointer}
+.day.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
 #status{color:var(--muted);font-size:13px} #status.err{color:var(--fail)}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--hairline);border-top-color:var(--accent);
 border-radius:50%;animation:r .8s linear infinite;vertical-align:-2px;margin-right:6px}
@@ -162,7 +181,21 @@ margin:0;color:var(--ink)}
 </style></head><body>
 <header class="hero"><h1>arch<em>drift</em></h1></header>
 <main>
-<div class="card"><h1>archdrift <small>architecture match gate — pick a service, run the audit</small></h1>
+<div class="card"><div class="head">
+<h1>archdrift <small>architecture match gate — pick a service, run the audit</small></h1>
+<button type="button" id="autorun" class="ghost">&#128197; auto-run <span class="soon">soon</span></button>
+</div>
+<div id="autopanel" hidden>
+<div style="flex-basis:100%">
+<span class="lblx">runs every month on — pick one or more days</span>
+<div id="ar-days"></div>
+</div>
+<label>time <input type="time" id="ar-time" value="07:00"></label>
+<button type="button" class="ghost" disabled title="coming soon — not wired up yet">
+schedule <span class="soon">soon</span></button>
+<span class="note">Scheduled audits are coming soon: the gate will run itself on the selected
+days of every month and deliver the report.</span>
+</div>
 <form id="f">
 <label>namespace / group
 <select id="group" required><option value="">loading groups…</option></select></label>
@@ -183,9 +216,20 @@ margin:0;color:var(--ink)}
 <option value="claude-sonnet-5" selected>Claude Sonnet 5</option></select></label>
 <div class="row"><button id="go">run</button><span id="status">__SETUP__</span></div>
 </form></div>
+<div id="share">
+<span class="lbl">share the report</span>
+<button type="button" class="ghost" disabled title="coming soon — not wired up yet">
+&#9993;&#65039; send e-mail <span class="soon">soon</span></button>
+<button type="button" class="ghost" disabled title="coming soon — not wired up yet">
+post to a Teams channel <span class="soon">soon</span></button>
+</div>
 <iframe id="report" title="archdrift report"></iframe>
 <script>
 const $=id=>document.getElementById(id), status=(t,err)=>{ $("status").innerHTML=t; $("status").className=err?"err":""; };
+$("autorun").onclick=()=>{ $("autopanel").hidden=!$("autopanel").hidden; };
+{const d=$("ar-days"); for(let i=1;i<=31;i++){ const b=document.createElement("button");
+  b.type="button"; b.className="day"+([1,15].includes(i)?" on":""); b.textContent=i;
+  b.onclick=()=>b.classList.toggle("on"); d.appendChild(b); }}
 const api=async(p)=>{const r=await fetch(p); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j;};
 {const d=$("profile").dataset.def; if([...$("profile").options].some(o=>o.value===d)) $("profile").value=d;}
 (async()=>{try{  // live model list from the Models API; the two hardcoded options stay as fallback
@@ -218,6 +262,7 @@ $("group").onchange=async()=>{
 };
 $("f").onsubmit=async ev=>{
   ev.preventDefault(); $("go").disabled=true; $("report").style.display="none";
+  $("share").style.display="none";
   status('<span class="spin"></span>pulling repo → parsing HLD → auditing… (this takes a minute)');
   try{
     const r=await fetch("/api/run",{method:"POST",headers:{"content-type":"application/json"},
@@ -229,6 +274,7 @@ $("f").onsubmit=async ev=>{
     const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText);
     status(`done — ${j.total}% match`, !j.passed);
     $("report").srcdoc=j.html; $("report").style.display="block";
+    $("share").style.display="flex";
   }catch(e){status(e.message,1)}
   $("go").disabled=false;
 };
